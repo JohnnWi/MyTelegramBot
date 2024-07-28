@@ -19,7 +19,7 @@
     pip install python-telegram-bot pyTelegramBotAPI requests python-dotenv APScheduler
     ```
 
-7. Avvia lo script:
+7. Avvia lo script (se non ricevi nessun messaggio allora sta funzionando):
 
     ```sh
     python crypto2.py
