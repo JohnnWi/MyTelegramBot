@@ -6,6 +6,8 @@ import requests
 from dotenv import load_dotenv
 import locale
 from apscheduler.schedulers.background import BackgroundScheduler
+import pandas as pd
+from io import BytesIO
 
 # Caricamento delle variabili d'ambiente
 load_dotenv()
@@ -94,27 +96,68 @@ def get_current_price(crypto):
         print(f"Errore nella richiesta API per {crypto}: {e}")
         return None, None
 
+# Funzioni per l'importazione/esportazione Excel
+def export_transactions_to_excel(user_id):
+    conn = get_db_connection()
+    query = "SELECT crypto, quantity, price, date FROM transactions WHERE user_id = ?"
+    df = pd.read_sql_query(query, conn, params=(user_id,))
+    conn.close()
+    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Transactions')
+    output.seek(0)
+    return output
+
+def import_transactions_from_excel(user_id, file):
+    df = pd.read_excel(file)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    for _, row in df.iterrows():
+        cursor.execute("""
+        INSERT INTO transactions (user_id, crypto, quantity, price, date)
+        VALUES (?, ?, ?, ?, ?)
+        """, (user_id, row['crypto'], row['quantity'], row['price'], row['date']))
+    conn.commit()
+    conn.close()
+    return len(df)
+
 # Handler dei comandi
 @bot.message_handler(commands=['start', 'help'])
 @authorized_only
 def send_welcome(message):
     help_text = """
     Comandi disponibili:
+
+    *TRANSAZIONI*
     /add - Aggiungi una nuova transazione
     /addmultiple - Aggiungi multiple transazioni in una volta
+    /deleteedit - Elimina o modifica una transazione esistente
+    /reset - Cancella tutti i dati salvati
+
+    *VISUALIZZA*
     /balance - Mostra il saldo attuale e le performance
     /profit - Mostra il profitto/perdita totale
     /weekly - Mostra il confronto con 7 giorni fa
-    /history <crypto> - Mostra lo storico delle transazioni per una criptovaluta
-    /deleteedit - Elimina o modifica una transazione esistente
-    /reset - Cancella tutti i dati salvati
+    /history <crypto> - Storico delle transazioni per una criptovaluta
     /debug - Mostra le ultime 20 transazioni nel database
+
+    *IMPOSTAZIONI PER L'ALERT*
     /setalert - Imposta un avviso di prezzo
+    /viewalerts - Visualizza gli alert impostati
+    /editalert - Modifica un alert esistente
+    /deletealert - Elimina un alert esistente
+
+    *IMPOSTAZIONI PER REPORT*
     /setreport - Imposta un report periodico del portafoglio
     /deletereport - Cancella il report periodico programmato
     /showreport - Mostra il report periodico attualmente impostato
+
+    *IMPORTA-ESPORTA*
+    /exportexcel - Esporta le transazioni in un file Excel
+    /importexcel - Importa le transazioni da un file Excel
     """
-    bot.reply_to(message, help_text)
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['add'])
 @authorized_only
@@ -489,6 +532,92 @@ def process_price_alert(message):
     except ValueError:
         bot.reply_to(message, "Formato non valido. Usa: SIMBOLO PREZZO SOPRA/SOTTO (es. BTC 30000 SOPRA)")
 
+@bot.message_handler(commands=['viewalerts'])
+@authorized_only
+def view_alerts(message):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, crypto, target_price, is_above FROM price_alerts WHERE user_id = ?", (message.from_user.id,))
+    alerts = cursor.fetchall()
+    conn.close()
+    
+    if not alerts:
+        bot.reply_to(message, "Non hai impostato alcun alert di prezzo.")
+        return
+    
+    response = "I tuoi alert di prezzo:\n\n"
+    for alert in alerts:
+        direction = "sopra" if alert['is_above'] else "sotto"
+        response += f"ID: {alert['id']} - {alert['crypto']} {direction} ${alert['target_price']:.2f}\n"
+    
+    bot.reply_to(message, response)
+
+@bot.message_handler(commands=['editalert'])
+@authorized_only
+def edit_alert_start(message):
+    view_alerts(message)
+    msg = bot.reply_to(message, "Inserisci l'ID dell'alert che vuoi modificare:")
+    bot.register_next_step_handler(msg, process_edit_alert_id)
+
+def process_edit_alert_id(message):
+    try:
+        alert_id = int(message.text)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM price_alerts WHERE id = ? AND user_id = ?", (alert_id, message.from_user.id))
+        alert = cursor.fetchone()
+        conn.close()
+        
+        if alert:
+            msg = bot.reply_to(message, f"Stai modificando l'alert per {alert['crypto']}. Inserisci i nuovi dettagli nel formato: PREZZO SOPRA/SOTTO")
+            bot.register_next_step_handler(msg, process_edit_alert, alert_id)
+        else:
+            bot.reply_to(message, "Alert non trovato. Usa /viewalerts per vedere i tuoi alert.")
+    except ValueError:
+        bot.reply_to(message, "Per favore, inserisci un ID valido.")
+
+def process_edit_alert(message, alert_id):
+    try:
+        price, direction = message.text.split()
+        price = float(price)
+        is_above = direction.upper() == 'SOPRA'
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE price_alerts SET target_price = ?, is_above = ? WHERE id = ? AND user_id = ?",
+                       (price, is_above, alert_id, message.from_user.id))
+        conn.commit()
+        conn.close()
+        
+        direction_text = "sopra" if is_above else "sotto"
+        bot.reply_to(message, f"Alert modificato: nuovo target {direction_text} ${price:.2f}")
+    except ValueError:
+        bot.reply_to(message, "Formato non valido. Usa: PREZZO SOPRA/SOTTO")
+
+@bot.message_handler(commands=['deletealert'])
+@authorized_only
+def delete_alert_start(message):
+    view_alerts(message)
+    msg = bot.reply_to(message, "Inserisci l'ID dell'alert che vuoi eliminare:")
+    bot.register_next_step_handler(msg, process_delete_alert)
+
+def process_delete_alert(message):
+    try:
+        alert_id = int(message.text)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM price_alerts WHERE id = ? AND user_id = ?", (alert_id, message.from_user.id))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        
+        if deleted:
+            bot.reply_to(message, f"Alert con ID {alert_id} eliminato con successo.")
+        else:
+            bot.reply_to(message, "Alert non trovato. Usa /viewalerts per vedere i tuoi alert.")
+    except ValueError:
+        bot.reply_to(message, "Per favore, inserisci un ID valido.")
+
 @bot.message_handler(commands=['setreport'])
 @authorized_only
 def set_report(message):
@@ -549,6 +678,33 @@ def show_report(message):
         bot.reply_to(message, f"Hai un report programmato con frequenza '{frequency}' alle {time}")
     else:
         bot.reply_to(message, "Non hai report programmati al momento.")
+
+@bot.message_handler(commands=['exportexcel'])
+@authorized_only
+def export_excel(message):
+    excel_file = export_transactions_to_excel(message.from_user.id)
+    bot.send_document(message.chat.id, ('transactions.xlsx', excel_file.getvalue()), caption="Ecco le tue transazioni in formato Excel.")
+
+@bot.message_handler(commands=['importexcel'])
+@authorized_only
+def import_excel_command(message):
+    msg = bot.reply_to(message, "Per favore, invia il file Excel con le tue transazioni.")
+    bot.register_next_step_handler(msg, process_excel_import)
+
+def process_excel_import(message):
+    if message.document is None:
+        bot.reply_to(message, "Per favore, invia un file Excel valido.")
+        return
+    
+    file_info = bot.get_file(message.document.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    
+    try:
+        excel_file = BytesIO(downloaded_file)
+        num_imported = import_transactions_from_excel(message.from_user.id, excel_file)
+        bot.reply_to(message, f"Importazione completata con successo. {num_imported} transazioni importate.")
+    except Exception as e:
+        bot.reply_to(message, f"Si è verificato un errore durante l'importazione: {str(e)}")
 
 def send_scheduled_report(user_id):
     conn = get_db_connection()
@@ -612,8 +768,18 @@ def update_report_scheduler():
             scheduler.add_job(send_scheduled_report, 'cron', hour=f"{time.hour},{(time.hour+12)%24}", minute=time.minute, args=[user_id])
         elif frequency == 'every_3_days':
             scheduler.add_job(send_scheduled_report, 'cron', day='*/3', hour=time.hour, minute=time.minute, args=[user_id])
-
-
+        elif frequency == 'weekly':
+            scheduler.add_job(send_scheduled_report, 'cron', day_of_week='mon', hour=time.hour, minute=time.minute, args=[user_id])
+        elif frequency == 'twice_weekly':
+            scheduler.add_job(send_scheduled_report, 'cron', day_of_week='mon,thu', hour=time.hour, minute=time.minute, args=[user_id])
+        elif frequency == 'monthly':
+            scheduler.add_job(send_scheduled_report, 'cron', day=1, hour=time.hour, minute=time.minute, args=[user_id])
+        elif frequency == 'quarterly':
+            scheduler.add_job(send_scheduled_report, 'cron', month='1,4,7,10', day=1, hour=time.hour, minute=time.minute, args=[user_id])
+        elif frequency == 'semi_annually':
+            scheduler.add_job(send_scheduled_report, 'cron', month='1,7', day=1, hour=time.hour, minute=time.minute, args=[user_id])
+        elif frequency == 'annually':
+            scheduler.add_job(send_scheduled_report, 'cron', month=1, day=1, hour=time.hour, minute=time.minute, args=[user_id])
 def check_price_alerts():
     conn = get_db_connection()
     cursor = conn.cursor()
