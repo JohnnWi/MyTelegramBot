@@ -34,6 +34,6 @@
     ```
 
 8. Vai su Telegram, cerca il tuo bot e invia il comando `/start`.
-9. Ricordati che quando aggiungi le transazioni NON devi inserire il nome della crypto ma il simbolo. Per esempio invece di scrivere Bitcoin, scrivi '`/BTC`.
+9. Ricordati che quando aggiungi le transazioni NON devi inserire il nome della crypto ma il simbolo. Per esempio invece di scrivere Bitcoin, scrivi `/BTC`.
 
 N.B. SE HAI ERRORI, FORNISCI IL CODICE A CHATGPT E INSIEME L'ERRORE E TI AIUTERà
